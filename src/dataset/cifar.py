@@ -6,13 +6,13 @@ class CIFARN(datasets.CIFAR100):
     def __init__(
         self,
         root,
+        selected_classes_names: list[str],
         train=True,
         transform=None,
         target_transform=None,
         download=False,
-        selected_classes_names: list = None,
     ):
-        if selected_classes_names is None or len(selected_classes_names) == 0:
+        if len(selected_classes_names) == 0:
             raise ValueError("selected_classes_names must have content.")
 
         super().__init__(
@@ -25,15 +25,15 @@ class CIFARN(datasets.CIFAR100):
 
         selected_classes = {
             k: v for (k, v) in self.class_to_idx.items() if k in selected_classes_names
-        }  # {'bicycle': 8, 'dolphin': 30, 'motorcycle': 48, 'ray': 67, 'shark': 73, 'tank': 85, 'tractor': 89, 'trout': 91}
+        }  # example: {'bicycle': 8, 'dolphin': 30, 'motorcycle': 48, 'ray': 67, 'shark': 73, 'tank': 85, 'tractor': 89, 'trout': 91}
         self.class_to_idx = {
             k: selected_classes_names.index(k)
             for (k, v) in self.class_to_idx.items()
             if k in selected_classes_names
-        }  # {'bicycle': 4, 'dolphin': 3, 'motorcycle': 5, 'ray': 0, 'shark': 2, 'tank': 6, 'tractor': 7, 'trout': 1}
+        }  # example: {'bicycle': 4, 'dolphin': 3, 'motorcycle': 5, 'ray': 0, 'shark': 2, 'tank': 6, 'tractor': 7, 'trout': 1}
         self.original_class_mapping = {
             selected_classes[k]: self.class_to_idx[k] for k in selected_classes.keys()
-        }  # {8: 4, 30: 3, 48: 5 ...}
+        }  # example: {8: 4, 30: 3, 48: 5 ...}
 
         # Filter and remap classes
         mask = [target in self.original_class_mapping for target in self.targets]
@@ -62,11 +62,11 @@ class CIFAR8(CIFARN):
 
         super().__init__(
             root,
+            selected_classes_names=self.selected_classes_names,
             train=train,
             transform=transform,
             target_transform=target_transform,
             download=download,
-            selected_classes_names=self.selected_classes_names,
         )
 
     def get_subset(self, labels: list[str] | list[int]) -> Subset:
