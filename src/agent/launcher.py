@@ -1,162 +1,89 @@
 import asyncio
-import spade
-import random
+import time
 
-from aioxmpp import JID, PresenceState, PresenceShow
-from aioxmpp.stanza import Presence
-from spade.agent import Agent
-from spade.behaviour import FSMBehaviour, State, PeriodicBehaviour
-from spade.message import Message
-from spade.template import Template
+from aioxmpp import JID
+import networkx as nx
+
+from concurrent.futures import CancelledError
 from threading import Thread
+from spade.agent import Agent
+from base import AgentBase, AgentNodeBase
 
 
-class LauncherAgent(Agent):
+class LauncherAgent(AgentBase):
     def __init__(
         self,
         jid: str,
         password: str,
+        neighbours: list[JID],
+        agents: list[AgentNodeBase],
+        web_address: str = "0.0.0.0",
+        web_port: int = 10000,
         verify_security: bool = False,
-        agents: set[Agent] = None,
     ):
-        super().__init__(jid, password, verify_security)
-        self.agents = agents
-        self.threads: list[Thread] = []
-
-    async def web_controller(self, request):
-        return {}
-
-    async def web_stop_agents(self, request):
-        await self.stop_agents()
-        return {}
-
-    async def web_stop_all_agents(self, request):
-        await self.stop_agents()
-        await self.stop()
-        return {}
-
-    async def stop_agents(self) -> None:
-        # available_neighbours = self.get_available_neighbours()
-        # for jid in available_neighbours:
-        #     print(f" -- [{self.name}] unsubscribing from {jid.bare()}")
-        #     self.presence.unsubscribe(f"{jid}")
-        for ag in self.agents:
-            if ag.is_alive():
-                await ag.stop()
-
-    def launch_agent(self, agent: Agent) -> None:
-        print(f"[{agent.name}] Starting thread...")
-        future = asyncio.gather(agent.start())
-        future.result()
-        print(f"[{agent.name}] Future ended.")
-
-    async def setup(self) -> None:
-        self.web.add_get("/launcher", lambda request: {}, "src/interface/launcher.html")
-        self.web.add_get("/stopagents", self.web_stop_agents, None)
-        self.web.add_get("/stopallagents", self.web_stop_all_agents, None)
-        self.presence.approve_all = True
-        for agent in self.agents:
-            t = Thread(target=self.launch_agent, args=(agent))
-            t.daemon = True
-            t.name = agent.name
-            self.threads.append(t)
-        # coros = [ag.start(auto_register=True) for ag in self.agents]
-        # await asyncio.gather(*coros)
-        # for ag in self.agents:
-        #     await ag.start(auto_register=True)
-        self.presence.set_presence(
-            state=PresenceState(True, PresenceShow.CHAT), status="READY2CONS"
+        super().__init__(
+            jid=jid,
+            password=password,
+            neighbours=neighbours,
+            web_address=web_address,
+            web_port=web_port,
+            verify_security=verify_security,
         )
-        self.add_behaviour(self.Presence(period=3))
-
-    async def stop(self) -> None:
-        for t in self.threads:
-            if t.is_alive():
-                t.join()
-        if self.is_alive():
-            print("Stopping the launcher agent...")
-            self.presence.set_unavailable()
-            available_neighbours = self.get_available_neighbours()
-            for jid in available_neighbours:
-                print(f" -- [{self.name}] unsubscribing from {jid.bare()}")
-                self.presence.unsubscribe(f"{jid}")
-            await super().stop()
-
-    def get_available_neighbours(self) -> set[JID]:
-        return {
-            jid
-            for (jid, value) in self.presence.get_contacts().items()
-            if "presence" in value and value["presence"].show is not None
+        self.agents: list[AgentNodeBase] = agents
+        self.threads: list[Thread] = []
+        self.launched_agents: dict[AgentNodeBase, bool] = {
+            a: False for a in self.agents
         }
 
-    def get_non_available_neighbours(self) -> list[JID]:
-        available_neighbours_jids = self.get_available_neighbours()
-        all_neighbours_jids: set[JID] = {agent.jid for agent in self.agents}
-        return all_neighbours_jids - available_neighbours_jids
+    def launch_agents(self) -> None:
+        for agent in self.agents:
+            try:
+                t = Thread(target=self.launch_agent, args=[agent])
+                t.daemon = True
+                t.name = str(agent.jid)
+                self.threads.append(t)
+                t.start()
+                self.launched_agents[agent] = True
+                print(f"[{agent.jid}] launched.")
+            except RuntimeError as e:
+                print(f"[{agent.jid}] exploded before being launched, because: {e}.")
 
-    class Presence(PeriodicBehaviour):
-        async def on_start(self) -> None:
-            self.saved_available_neighbours: set[JID] = set([])
-            self.agent.presence.set_available()
-            self.agent.presence.on_subscribe = self.on_subscribe
-            self.agent.presence.on_subscribed = self.on_subscribed
-            self.agent.presence.on_available = self.on_available
-            self.agent.presence.on_unavailable = self.on_unavailable
-            self.agent.presence.approve_all = True
-            self.agent.presence.set_presence(
-                state=PresenceState(True, PresenceShow.CHAT), status="READY2CONS"
-            )
+    def any_agent_alive(self) -> bool:
+        return any(agent.is_alive() for agent in self.agents)
 
-        async def run(self) -> None:
-            self.subscribe_to_non_availables()
-            if self.__update_available_neighbours():
-                print(
-                    f"[{self.agent.name}] Contacts List: {self.agent.presence.get_contacts()}"
-                )
+    def all_agents_are_launched(self) -> bool:
+        return all(self.launched_agents.values())
 
-        def subscribe(self, agents: set[JID]) -> None:
-            for jid in agents:
-                self.agent.presence.subscribe(str(jid))
+    def wait_for_agents(self) -> None:
+        while self.any_agent_alive():
+            time.sleep(1)
 
-        def subscribe_to_non_availables(self) -> None:
-            non_availables = self.agent.get_non_available_neighbours()
-            if non_availables:
-                self.subscribe(non_availables)
+    def wait_for_agent_threads(self) -> None:
+        for thread in self.threads:
+            thread.join()
 
-        def __update_available_neighbours(self) -> bool:
-            """
-            Updates the available agents and returns if the list has been updated.
+    def stop_agents(self) -> None:
+        for agent in self.agents:
+            if agent.is_alive():
+                future = agent.stop()
+                future.result()
 
-            Returns:
-                bool: True if the list has been updated, False otherwise.
-            """
-            available_neighbours: set[JID] = self.agent.get_available_neighbours()
-            if (
-                len(
-                    available_neighbours.symmetric_difference(
-                        self.saved_available_neighbours
-                    )
-                )
-                > 0
-            ):
-                self.saved_available_neighbours = available_neighbours
-                return True
-            return False
+    async def aync_wait_for_agents(self) -> None:
+        while self.any_agent_alive():
+            await asyncio.sleep(1)
 
-        def on_available(self, jid: str, stanza: Presence) -> None:
-            print(f"[{self.agent.name}] Agent {jid} is available.")
+    async def async_stop_agents(self) -> None:
+        for agent in self.agents:
+            await agent.stop()
 
-        def on_subscribed(self, jid: str) -> None:
-            print(f"[{self.agent.name}] Agent {jid} has accepted the subscription.")
-            print(
-                f"[{self.agent.name}] Contacts List: {self.agent.presence.get_contacts()}"
-            )
+    async def web_start_agents(self, request):
+        post_parameters = await request.post()
 
-        def on_subscribe(self, jid: str) -> None:
-            print(
-                f"[{self.agent.name}] Agent {jid} asked for subscription. Let's aprove it."
-            )
-            self.agent.presence.approve(jid)
-
-        def on_unavailable(self, jid: str, stanza: Presence) -> None:
-            print(f"[{self.agent.name}] Agent {jid} is unavailable.")
+    def launch_agent(self, agent: AgentNodeBase) -> None:
+        try:
+            future = agent.start(auto_register=True)
+            future.result()
+        except CancelledError as e:
+            print(f"[{agent.jid}] cancelled.")
+        finally:
+            print(f"[{agent.jid}] ending thread.")
